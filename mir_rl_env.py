@@ -1,6 +1,8 @@
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
+from xMIR import xMIR
+from yMIR import yMIR
 
 class MiRRLPathEnv(gym.Env):
     def __init__(self, tcp_path):
@@ -8,8 +10,8 @@ class MiRRLPathEnv(gym.Env):
         self.tcp_path = tcp_path
         self.n_substeps = 10  # MiR steps per TCP point
         self.t_step = 0.1     # 100 ms per step
-        self.v_max = 0.5      # max linear velocity [m/s]
-        self.w_max = 1.0      # max angular velocity [rad/s]
+        self.v_max = 0.4      # max linear velocity [m/s]
+        self.w_max = 0.8      # max angular velocity [rad/s]
         self.ur_offset = np.array([0.3, -0.2])  # UR10 base offset in MiR frame
 
         self.action_space = spaces.Box(low=np.array([-self.v_max, -self.w_max]),
@@ -26,16 +28,20 @@ class MiRRLPathEnv(gym.Env):
         obs_low = np.array([x_min, y_min, x_min, y_min, -np.pi], dtype=np.float32)
         obs_high = np.array([x_max, y_max, x_max, y_max, np.pi], dtype=np.float32)
         self.observation_space = spaces.Box(low=obs_low, high=obs_high, dtype=np.float32)
+        self.prev_action = np.array([0.0, 0.0])
 
 
         obs, _ = self.reset()
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
+        x_start = xMIR()[0]
+        y_start = yMIR()[0]
         self.tcp_index = 0
         self.substep = 0
-        self.mir_pose = np.array([self.tcp_path[0][0] - 0.8, self.tcp_path[0][1], 0.0])
-        return self._get_obs(), {}  # Rückgabe: (observation, info)
+        self.prev_action = np.array([0.0, 0.0])
+        self.mir_pose = np.array([x_start, y_start, 0.0])
+        return self._get_obs(), {}
 
 
     def _get_obs(self):
@@ -59,18 +65,29 @@ class MiRRLPathEnv(gym.Env):
         ur_y = y + np.sin(theta) * self.ur_offset[0] + np.cos(theta) * self.ur_offset[1]
 
         x_tcp, y_tcp = self.tcp_path[self.tcp_index]
+        
+        # Berechne Abstand
         dist = np.linalg.norm([ur_x - x_tcp, ur_y - y_tcp])
 
-        # Reward berechnen
-        if dist < 0.5:
-            reward = -10 * (0.5 - dist)
-        elif dist > 1.1:
-            reward = -10 * (dist - 1.1)
-        else:
-            reward = - (dist - 0.8) ** 2
+        # Differenz zur letzten Aktion
+        delta = np.abs(action - self.prev_action)
+        penalty = -5.0 * (delta[0]**2 + delta[1]**2)  # quadratische Strafe
 
+        # Reward und Termination
+        if dist < 0.5 or dist > 1.1:
+            reward = -100.0  # harter Abbruch
+            terminated = True
+        else:
+            distance_reward = 10.0 - 20.0 * abs(dist - 0.9)
+            reward = distance_reward + penalty
+            terminated = False
+            
         self.substep += 1
-        terminated = False
+
+
+
+        self.prev_action = action  # update für nächsten Schritt
+        
         truncated = False
         if self.substep >= self.n_substeps:
             self.substep = 0

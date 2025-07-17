@@ -23,7 +23,7 @@ callback = PlotTrajectoryCallback(eval_env, tcp_path, plot_freq=5000)
 model = PPO("MlpPolicy", env, verbose=1, tensorboard_log="./ppo_mir_log")
 
 # Training starten
-model.learn(total_timesteps=50000, callback=callback)
+model.learn(total_timesteps=500000, callback=callback)
 
 # Modell speichern
 model.save("ppo_mir_model")
