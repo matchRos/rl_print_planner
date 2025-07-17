@@ -79,7 +79,7 @@ class MiRRLPathEnv(gym.Env):
             terminated = True
         else:
             distance_reward = 10.0 - 20.0 * abs(dist - 0.9)
-            reward = distance_reward + penalty
+            reward = distance_reward + penalty + 0.1 * (self.n_substeps - self.substep)  # Belohnung für verbleibende Schritte
             terminated = False
             
         self.substep += 1
