@@ -17,7 +17,7 @@ if __name__ == "__main__":
     tcp_path = list(zip(xTCP(), yTCP()))
 
     # SubprocVecEnv erstellen
-    n_envs = 4
+    n_envs = 12
     env = SubprocVecEnv([make_env(tcp_path) for _ in range(n_envs)])
 
     # Separates eval_env + Plot Callback
@@ -29,7 +29,7 @@ if __name__ == "__main__":
 
     # PPO trainieren
     model = PPO("MlpPolicy", env, verbose=1, tensorboard_log="./ppo_mir_log")
-    model.learn(total_timesteps=500000, callback=callback)
+    model.learn(total_timesteps=5000000, callback=callback)
 
     # Modell speichern
     model.save("ppo_mir_model")

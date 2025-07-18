@@ -31,7 +31,20 @@ class MiRRLPathEnv(gym.Env):
 
         obs_low = np.array([x_min, y_min, x_min, y_min, -np.pi], dtype=np.float32)
         obs_high = np.array([x_max, y_max, x_max, y_max, np.pi], dtype=np.float32)
-        self.observation_space = spaces.Box(low=obs_low, high=obs_high, dtype=np.float32)
+        self.observation_space = spaces.Box(
+            low=np.array([
+                0.0, 0.0,            # x_tcp, y_tcp
+                0.0, 0.0, -np.pi,    # x_mir, y_mir, theta
+                -1.0, -1.0,          # prev v, w
+                0.0                  # dist_offset
+            ], dtype=np.float32),
+            high=np.array([
+                100.0, 100.0,        # x_tcp, y_tcp
+                100.0, 100.0, np.pi, # x_mir, y_mir, theta
+                1.0, 1.0,            # prev v, w
+                2.0                  # dist_offset
+            ], dtype=np.float32)
+        )
         self.prev_action = np.array([0.0, 0.0])
 
 
@@ -47,12 +60,21 @@ class MiRRLPathEnv(gym.Env):
         self.mir_pose = np.array([x_start, y_start, 0.0])
         return self._get_obs(), {}
 
-
     def _get_obs(self):
         idx = min(self.tcp_index, len(self.tcp_path) - 1)
         x_tcp, y_tcp = self.tcp_path[idx]
         x, y, theta = self.mir_pose
-        return np.array([x_tcp, y_tcp, x, y, theta], dtype=np.float32)
+        ur_x = x + np.cos(theta) * self.ur_offset[0] - np.sin(theta) * self.ur_offset[1]
+        ur_y = y + np.sin(theta) * self.ur_offset[0] + np.cos(theta) * self.ur_offset[1]
+        dist_offset, _ = self.offset_tree.query([ur_x, ur_y])
+
+        obs = np.array([
+            x_tcp, y_tcp,        # TCP-Punkt absolut
+            x, y, theta,         # MiR Pose
+            *self.prev_action,   # vorherige Aktion (v, w)
+            dist_offset          # Abstand zur Offset-Kontur
+        ], dtype=np.float32)
+        return obs 
 
     def step(self, action):
 
@@ -89,9 +111,19 @@ class MiRRLPathEnv(gym.Env):
             info["killed_by_distance"] = True
             return self._get_obs(), reward, True, False, info
 
+        # --- Winkel zum TCP-Pfad ---
+        dx = x_tcp - x
+        dy = y_tcp - y
+        x_rel = np.cos(-theta) * dx - np.sin(-theta) * dy
+        y_rel = np.sin(-theta) * dx + np.cos(-theta) * dy
+        angle = np.arctan2(y_rel, x_rel)  # in MiR-Frame
+        angle_error = abs(angle + np.pi / 2)
+        angle_reward = max(0.0, 1.0 - angle_error / (np.pi / 2))  # ∈ [0, 1]
+
         # --- Abstand zur Offset-Kontur (positiv zentriert auf 0.6 m) ---
-        nearest_dist_offset, _ = self.offset_tree.query(ur_xy)
-        offset_reward = 1.0 - abs(nearest_dist_offset - 0.6) / 0.6  # [0..1], max bei 0.6 m
+        mir_xy = self.mir_pose[:2]
+        nearest_dist_offset, _ = self.offset_tree.query(mir_xy)
+        offset_reward = 1.0 - abs(nearest_dist_offset) / 0.6  # [0..1], max bei 0.6 m
         offset_reward = max(0.0, offset_reward)  # keine Strafe außerhalb
 
         # --- Glättungsbestrafung für Aktion (Delta v, w) ---
@@ -104,16 +136,19 @@ class MiRRLPathEnv(gym.Env):
         tcp_reward = max(0.0, tcp_reward)
 
         # --- Fortschritt (z. B. je TCP-Schritt) ---
-        progress_reward = 10.0 * (self.tcp_index / len(self.tcp_path))
+        progress_reward = 0.5 #10.0 * (self.tcp_index / len(self.tcp_path))
 
         # --- Gesamtreward ---
         reward = (
-            1.0 * tcp_reward +
-            10.0 * offset_reward +
+            0.0 * tcp_reward +
+            1.0 * offset_reward +
             0.0 * progress_reward +
-            1.0 * smooth_penalty  # ist negativ
+            0.0 * smooth_penalty +  # ist negativ
+            0.0 * angle_reward
         )   
 
+        #print(nearest_dist_offset)
+        #äprint(offset_reward)
         #print(f"TCP: {tcp_reward:.2f} | Offset: {offset_reward:.2f} | Smooth: {smooth_penalty:.2f} | Progress: {progress_reward:.2f} → Total: {reward:.2f}")
 
 
