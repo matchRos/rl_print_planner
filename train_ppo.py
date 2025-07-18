@@ -17,7 +17,7 @@ if __name__ == "__main__":
     tcp_path = list(zip(xTCP(), yTCP()))
 
     # SubprocVecEnv erstellen
-    n_envs = 12
+    n_envs = 4
     env = SubprocVecEnv([make_env(tcp_path) for _ in range(n_envs)])
 
     # Separates eval_env + Plot Callback

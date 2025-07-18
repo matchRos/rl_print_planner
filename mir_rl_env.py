@@ -4,21 +4,22 @@ from gymnasium import spaces
 from xMIR import xMIR
 from yMIR import yMIR
 from scipy.spatial import cKDTree
+from math import pi, cos, sin, atan2, sqrt
 
 class MiRRLPathEnv(gym.Env):
     def __init__(self, tcp_path):
         super().__init__()
         self.tcp_path = tcp_path
-        self.n_substeps = 10  # MiR steps per TCP point
-        self.t_step = 0.1     # 100 ms per step
-        self.v_max = 0.4      # max linear velocity [m/s]
-        self.w_max = 0.8      # max angular velocity [rad/s]
+        self.n_substeps = 2  # MiR steps per TCP point
+        self.t_step = 0.5     # 100 ms per step
+        self.v_max = 0.3      # max linear velocity [m/s]
+        self.w_max = 0.5      # max angular velocity [rad/s]
         self.ur_offset = np.array([0.3, -0.2])  # UR10 base offset in MiR frame
         self.tcp_tree = cKDTree(self.tcp_path)  # nur xy-Koordinaten
         offset_path = list(zip(xMIR(), yMIR()))
         self.offset_tree = cKDTree(offset_path)
 
-        self.action_space = spaces.Box(low=np.array([0, -self.w_max]),
+        self.action_space = spaces.Box(low=np.array([0.001, -self.w_max]),
                                        high=np.array([self.v_max, self.w_max]),
                                        dtype=np.float32)
 
@@ -32,17 +33,19 @@ class MiRRLPathEnv(gym.Env):
         obs_low = np.array([x_min, y_min, x_min, y_min, -np.pi], dtype=np.float32)
         obs_high = np.array([x_max, y_max, x_max, y_max, np.pi], dtype=np.float32)
         self.observation_space = spaces.Box(
-            low=np.array([
-                0.0, 0.0,            # x_tcp, y_tcp
-                0.0, 0.0, -np.pi,    # x_mir, y_mir, theta
-                -1.0, -1.0,          # prev v, w
-                0.0                  # dist_offset
+            low = np.array([
+                0.0, 0.0,            # MiR x, y
+                0.0, 0.0,            # UR x, y
+                -np.pi,              # MiR θ
+                -1.0, -1.0,          # prev_action v, w (Grenzen je nach Aktionsraum)
+                min(xMIR()), min(yMIR())  # Offset x, y
             ], dtype=np.float32),
-            high=np.array([
-                100.0, 100.0,        # x_tcp, y_tcp
-                100.0, 100.0, np.pi, # x_mir, y_mir, theta
-                1.0, 1.0,            # prev v, w
-                2.0                  # dist_offset
+            high = np.array([
+                100.0, 100.0,        # MiR x, y
+                100.0, 100.0,        # UR x, y
+                np.pi,               # MiR θ
+                1.0, 1.0,            # prev_action v, w
+                max(xMIR()), max(yMIR())  # Offset x, y
             ], dtype=np.float32)
         )
         self.prev_action = np.array([0.0, 0.0])
@@ -57,7 +60,8 @@ class MiRRLPathEnv(gym.Env):
         self.tcp_index = 0
         self.substep = 0
         self.prev_action = np.array([0.0, 0.0])
-        self.mir_pose = np.array([x_start, y_start, 0.0])
+        phi = atan2(yMIR()[1] - y_start, xMIR()[1] - x_start)
+        self.mir_pose = np.array([x_start, y_start, phi])
         return self._get_obs(), {}
 
     def _get_obs(self):
@@ -68,12 +72,16 @@ class MiRRLPathEnv(gym.Env):
         ur_y = y + np.sin(theta) * self.ur_offset[0] + np.cos(theta) * self.ur_offset[1]
         dist_offset, _ = self.offset_tree.query([ur_x, ur_y])
 
+
+        x_offset_k = xMIR()[idx]
+        y_offset_k = yMIR()[idx]
+
         obs = np.array([
             x_tcp, y_tcp,        # TCP-Punkt absolut
-            x, y, theta,         # MiR Pose
-            *self.prev_action,   # vorherige Aktion (v, w)
-            dist_offset          # Abstand zur Offset-Kontur
-        ], dtype=np.float32)
+            x, y, theta,         # x, y
+            *self.prev_action,     # v, w
+            x_offset_k, y_offset_k # Punkt aus Offset-Kontur passend zu tcp_index
+            ], dtype=np.float32)
         return obs 
 
     def step(self, action):
@@ -94,18 +102,27 @@ class MiRRLPathEnv(gym.Env):
         ur_x = x + np.cos(theta) * self.ur_offset[0] - np.sin(theta) * self.ur_offset[1]
         ur_y = y + np.sin(theta) * self.ur_offset[0] + np.cos(theta) * self.ur_offset[1]
 
-        x_tcp, y_tcp = self.tcp_path[self.tcp_index]
+        idx = min(self.tcp_index, len(self.tcp_path) - 1)
+        x_tcp, y_tcp = self.tcp_path[idx]
         
         # Berechne Abstand
         ur_xy = np.array([ur_x, ur_y])
         nearest_dist, nearest_idx = self.tcp_tree.query(ur_xy)
 
-        dist = np.linalg.norm([ur_x - x_tcp, ur_y - y_tcp])
+        #dist = np.linalg.norm([ur_x - x_tcp, ur_y - y_tcp])
+        dist = np.linalg.norm([x - x_tcp, y - y_tcp])
 
         # --- Abstand zum TCP-Pfad (Kill-Bedingung) ---
         ur_xy = np.array([ur_x, ur_y])
         nearest_dist_tcp, _ = self.tcp_tree.query(ur_xy)
-        if nearest_dist_tcp < 0.5 or dist > 1.1:
+        if nearest_dist_tcp < 0.1:
+            #print(f"Kill condition met at step {self.tcp_index} with distance {nearest_dist_tcp:.2f} m")
+            reward = -1.0  # skaliert
+            terminated = True
+            info["killed_by_distance"] = True
+            return self._get_obs(), reward, True, False, info
+        elif dist > 1.5:
+            #print(f"Distance exceeded at step {self.tcp_index} with distance {dist:.2f} m")
             reward = -1.0  # skaliert
             terminated = True
             info["killed_by_distance"] = True
@@ -126,6 +143,15 @@ class MiRRLPathEnv(gym.Env):
         offset_reward = 1.0 - abs(nearest_dist_offset) / 0.6  # [0..1], max bei 0.6 m
         offset_reward = max(0.0, offset_reward)  # keine Strafe außerhalb
 
+        # --- Abstand zum klassischer geplanten MiR-Position ---
+
+        x_off = xMIR()[idx]
+        y_off = yMIR()[idx]
+        mir_xy = self.mir_pose[:2]
+        offset_dist = np.linalg.norm([mir_xy[0] - x_off, mir_xy[1] - y_off])
+        preplanned_path_reward = 1.0 - offset_dist 
+        preplanned_path_reward = max(0.0, preplanned_path_reward)  # keine Strafe außerhalb
+
         # --- Glättungsbestrafung für Aktion (Delta v, w) ---
         delta = np.abs(action - self.prev_action)
         smooth_penalty = - (0.5 * delta[0]**2 + 0.1 * delta[1]**2)  # weiche Gewichtung
@@ -135,16 +161,20 @@ class MiRRLPathEnv(gym.Env):
         tcp_reward = 1.0 - abs(nearest_dist_tcp - 0.9) / 0.4  # max bei 0.9, null bei Grenze
         tcp_reward = max(0.0, tcp_reward)
 
-        # --- Fortschritt (z. B. je TCP-Schritt) ---
-        progress_reward = 0.5 #10.0 * (self.tcp_index / len(self.tcp_path))
+        dist_reward = 1.0 - abs(dist - 0.9) 
 
-        # --- Gesamtreward ---
+        # --- Fortschritt (z. B. je TCP-Schritt) ---
+        progress_reward = 10.0 * (idx / len(self.tcp_path))
+
+          # --- Gesamtreward ---
         reward = (
             0.0 * tcp_reward +
-            1.0 * offset_reward +
-            0.0 * progress_reward +
-            0.0 * smooth_penalty +  # ist negativ
-            0.0 * angle_reward
+            0.0 * offset_reward +
+            1.0 * progress_reward +
+            1.0 * smooth_penalty +  # ist negativ
+            0.0 * angle_reward + 
+            3.0 * preplanned_path_reward + 
+            1.0 * dist_reward
         )   
 
         #print(nearest_dist_offset)
