@@ -17,13 +17,14 @@ check_env(env, warn=True)
 
 # Callback für Trajektorien-Plot erstellen
 eval_env = MiRRLPathEnv(tcp_path)  # separate evaluation environment
-callback = PlotTrajectoryCallback(eval_env, tcp_path, plot_freq=5000)
+callback = PlotTrajectoryCallback(eval_env, tcp_path)
 
 # PPO-Agent konfigurieren
 model = PPO("MlpPolicy", env, verbose=1, tensorboard_log="./ppo_mir_log")
 
 # Training starten
 model.learn(total_timesteps=500000, callback=callback)
+#model.learn(total_timesteps=500000)
 
 # Modell speichern
 model.save("ppo_mir_model")

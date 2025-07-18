@@ -3,6 +3,7 @@ import gymnasium as gym
 from gymnasium import spaces
 from xMIR import xMIR
 from yMIR import yMIR
+from scipy.spatial import cKDTree
 
 class MiRRLPathEnv(gym.Env):
     def __init__(self, tcp_path):
@@ -13,8 +14,11 @@ class MiRRLPathEnv(gym.Env):
         self.v_max = 0.4      # max linear velocity [m/s]
         self.w_max = 0.8      # max angular velocity [rad/s]
         self.ur_offset = np.array([0.3, -0.2])  # UR10 base offset in MiR frame
+        self.tcp_tree = cKDTree(self.tcp_path)  # nur xy-Koordinaten
+        offset_path = list(zip(xMIR(), yMIR()))
+        self.offset_tree = cKDTree(offset_path)
 
-        self.action_space = spaces.Box(low=np.array([-self.v_max, -self.w_max]),
+        self.action_space = spaces.Box(low=np.array([0, -self.w_max]),
                                        high=np.array([self.v_max, self.w_max]),
                                        dtype=np.float32)
 
@@ -51,6 +55,10 @@ class MiRRLPathEnv(gym.Env):
         return np.array([x_tcp, y_tcp, x, y, theta], dtype=np.float32)
 
     def step(self, action):
+
+        # Reward und Termination
+        info = {"killed_by_distance": False}
+
         v, w = np.clip(action, self.action_space.low, self.action_space.high)
         x, y, theta = self.mir_pose
 
@@ -67,27 +75,53 @@ class MiRRLPathEnv(gym.Env):
         x_tcp, y_tcp = self.tcp_path[self.tcp_index]
         
         # Berechne Abstand
+        ur_xy = np.array([ur_x, ur_y])
+        nearest_dist, nearest_idx = self.tcp_tree.query(ur_xy)
+
         dist = np.linalg.norm([ur_x - x_tcp, ur_y - y_tcp])
 
-        # Differenz zur letzten Aktion
-        delta = np.abs(action - self.prev_action)
-        penalty = -5.0 * (delta[0]**2 + delta[1]**2)  # quadratische Strafe
-
-        # Reward und Termination
-        if dist < 0.5 or dist > 1.1:
-            reward = -100.0  # harter Abbruch
+        # --- Abstand zum TCP-Pfad (Kill-Bedingung) ---
+        ur_xy = np.array([ur_x, ur_y])
+        nearest_dist_tcp, _ = self.tcp_tree.query(ur_xy)
+        if nearest_dist_tcp < 0.5 or dist > 1.1:
+            reward = -1.0  # skaliert
             terminated = True
-        else:
-            distance_reward = 10.0 - 20.0 * abs(dist - 0.9)
-            reward = distance_reward + penalty + 0.1 * (self.n_substeps - self.substep)  # Belohnung für verbleibende Schritte
-            terminated = False
-            
+            info["killed_by_distance"] = True
+            return self._get_obs(), reward, True, False, info
+
+        # --- Abstand zur Offset-Kontur (positiv zentriert auf 0.6 m) ---
+        nearest_dist_offset, _ = self.offset_tree.query(ur_xy)
+        offset_reward = 1.0 - abs(nearest_dist_offset - 0.6) / 0.6  # [0..1], max bei 0.6 m
+        offset_reward = max(0.0, offset_reward)  # keine Strafe außerhalb
+
+        # --- Glättungsbestrafung für Aktion (Delta v, w) ---
+        delta = np.abs(action - self.prev_action)
+        smooth_penalty = - (0.5 * delta[0]**2 + 0.1 * delta[1]**2)  # weiche Gewichtung
+        self.prev_action = action
+
+        # --- TCP-Abstand (weiche Belohnung für 0.9 m) ---
+        tcp_reward = 1.0 - abs(nearest_dist_tcp - 0.9) / 0.4  # max bei 0.9, null bei Grenze
+        tcp_reward = max(0.0, tcp_reward)
+
+        # --- Fortschritt (z. B. je TCP-Schritt) ---
+        progress_reward = 10.0 * (self.tcp_index / len(self.tcp_path))
+
+        # --- Gesamtreward ---
+        reward = (
+            1.0 * tcp_reward +
+            10.0 * offset_reward +
+            0.0 * progress_reward +
+            1.0 * smooth_penalty  # ist negativ
+        )   
+
+        #print(f"TCP: {tcp_reward:.2f} | Offset: {offset_reward:.2f} | Smooth: {smooth_penalty:.2f} | Progress: {progress_reward:.2f} → Total: {reward:.2f}")
+
+
+
+
         self.substep += 1
-
-
-
         self.prev_action = action  # update für nächsten Schritt
-        
+        terminated = False
         truncated = False
         if self.substep >= self.n_substeps:
             self.substep = 0
@@ -95,7 +129,7 @@ class MiRRLPathEnv(gym.Env):
             if self.tcp_index >= len(self.tcp_path):
                 terminated = True
 
-        return self._get_obs(), reward, terminated, truncated, {}
+        return self._get_obs(), reward, terminated, truncated, info
 
 
 # Dummy test
